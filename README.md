@@ -257,7 +257,7 @@ The following environment variables can be used to configure Livebook on boot:
     Must be a valid IPv4 or IPv6 address.
 
   * `LIVEBOOK_NODE` - sets the node name for running Livebook in a cluster.
-    Note that Livebook always runs using long names distrivution, so the
+    Note that Livebook always runs using long names distribution, so the
     node host name must use a fully qualified domain name (FQDN) or an IP
     address.
 
@@ -291,6 +291,10 @@ The following environment variables can be used to configure Livebook on boot:
   * `LIVEBOOK_WITHIN_IFRAME` - controls if the application is running inside an
     iframe. Set it to "true" to enable it. If you do enable it, then the application
     must run with HTTPS.
+
+The environment variables `ERL_AFLAGS` and `ERL_ZFLAGS` can also be set to configure
+Livebook and the notebook runtimes. `ELIXIR_ERL_OPTIONS` are also available to customize
+Livebook, but it is not forwarded to runtimes.
 
 <!-- Environment variables -->
 

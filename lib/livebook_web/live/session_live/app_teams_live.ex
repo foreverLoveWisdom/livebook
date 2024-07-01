@@ -66,21 +66,7 @@ defmodule LivebookWeb.SessionLive.AppTeamsLive do
       </div>
 
       <div :if={@messages != []} class="flex flex-col gap-2">
-        <.message_box :for={{kind, message} <- @messages} kind={kind}>
-          <div class="flex flex-auto items-center justify-between">
-            <span class="whitespace-pre-wrap"><%= raw(message) %></span>
-
-            <.link
-              :if={kind == :success}
-              href={"#{Livebook.Config.teams_url()}/orgs/#{@hub.org_id}"}
-              target="_blank"
-              class="font-medium text-blue-600"
-            >
-              <span>See all deployed apps</span>
-              <.remix_icon icon="external-link-line" />
-            </.link>
-          </div>
-        </.message_box>
+        <.message_box :for={{kind, message} <- @messages} kind={kind} message={message} />
       </div>
 
       <.content
@@ -102,6 +88,7 @@ defmodule LivebookWeb.SessionLive.AppTeamsLive do
 
   defp subtitle(:add_deployment_group), do: "Step: add deployment group"
   defp subtitle(:add_agent), do: "Step: add app server"
+  defp subtitle(:success), do: "Step: summary"
   defp subtitle(_), do: nil
 
   defp content(%{settings_valid?: false} = assigns) do
@@ -165,8 +152,8 @@ defmodule LivebookWeb.SessionLive.AppTeamsLive do
             </.message_box>
           <% else %>
             <.message_box kind={:info}>
-              Awaiting an app server to be set up. If you deploy the app,
-              it will only start once there is an app server to run it.
+              Awaiting an app server to be set up. If you click "Deploy anyway",
+              the app will only start once there is an app server.
             </.message_box>
           <% end %>
           <div class="flex gap-2">
@@ -193,15 +180,14 @@ defmodule LivebookWeb.SessionLive.AppTeamsLive do
     ~H"""
     <div class="flex flex-col gap-6">
       <p class="text-gray-700">
-        Deploy this app to your cloud infrastructure. The app will be pushed to the Livebook
-        Teams app servers associated with the deployment group that you choose.
+        Deploy this app to your cloud infrastructure using the <.workspace hub={@hub} /> workspace.
       </p>
 
       <%= if @deployment_group do %>
         <div class="flex flex-col gap-2">
           <div class="flex justify-between items-center">
             <p class="text-gray-700">
-              Using deployment group in <.workspace hub={@hub} /> workspace:
+              Deploying to:
             </p>
             <button class="font-medium text-blue-600" phx-click="unselect_deployment_group">
               Change
@@ -218,13 +204,13 @@ defmodule LivebookWeb.SessionLive.AppTeamsLive do
         </div>
 
         <div :if={@app_deployment} class="space-y-3">
-          <p class="text-gray-700">Currently deployed version:</p>
-          <.app_deployment_card app_deployment={@app_deployment} />
+          <p class="text-gray-700">Current version:</p>
+          <.app_deployment_card app_deployment={@app_deployment} deployment_group={@deployment_group} />
         </div>
 
         <.message_box :if={@num_agents[@deployment_group.id] == nil} kind={:warning}>
-          The selected deployment group has no app servers. If you deploy the app,
-          it will only start once there is an app server to run it.
+          The selected deployment group has no app servers. If you click "Deploy anyway",
+          the app will only start once there is an app server.
         </.message_box>
 
         <%= if @num_agents[@deployment_group.id] do %>
@@ -256,7 +242,7 @@ defmodule LivebookWeb.SessionLive.AppTeamsLive do
 
         <div :if={@deployment_groups != []} class="flex flex-col gap-2">
           <p class="text-gray-700">
-            Online deployment groups in <.workspace hub={@hub} /> workspace:
+            Choose a deployment group:
           </p>
           <div class="flex flex-col gap-3">
             <.deployment_group_entry
@@ -269,6 +255,37 @@ defmodule LivebookWeb.SessionLive.AppTeamsLive do
           </div>
         </div>
       <% end %>
+    </div>
+    """
+  end
+
+  defp content(%{action: :success} = assigns) do
+    ~H"""
+    <div class="flex flex-col gap-8">
+      <.message_box kind={:success}>
+        <div class="flex items-center justify-between">
+          <span>App deployment created successfully.</span>
+
+          <.link
+            href={"#{Livebook.Config.teams_url()}/orgs/#{@hub.org_id}"}
+            target="_blank"
+            class="font-medium text-blue-600"
+          >
+            <span>See all deployed apps</span>
+            <.remix_icon icon="external-link-line" />
+          </.link>
+        </div>
+      </.message_box>
+      <.app_deployment_card
+        :if={@app_deployment}
+        app_deployment={@app_deployment}
+        deployment_group={@deployment_group}
+      />
+      <div>
+        <.button color="gray" outlined phx-click="go_deployment_groups">
+          See deployment groups
+        </.button>
+      </div>
     </div>
     """
   end
@@ -327,6 +344,21 @@ defmodule LivebookWeb.SessionLive.AppTeamsLive do
   defp app_deployment_card(assigns) do
     ~H"""
     <div class="flex gap-4 sm:gap-12 border border-gray-200 rounded-lg p-4">
+      <.labeled_text label="Slug">
+        <%= if @deployment_group.url do %>
+          <.link
+            href={@deployment_group.url <> ~p"/apps/#{@app_deployment.slug}"}
+            target="_blank"
+            class="text-blue-600 font-medium"
+          >
+            /<%= @app_deployment.slug %>
+          </.link>
+        <% else %>
+          <span>
+            /<%= @app_deployment.slug %>
+          </span>
+        <% end %>
+      </.labeled_text>
       <.labeled_text label="Title">
         <%= @app_deployment.title %>
       </.labeled_text>
@@ -354,13 +386,7 @@ defmodule LivebookWeb.SessionLive.AppTeamsLive do
   def handle_event("deploy_app", _, socket) do
     with {:ok, app_deployment} <- pack_app(socket),
          :ok <- deploy_app(socket, app_deployment) do
-      message =
-        "App deployment created successfully."
-
-      {:noreply,
-       socket
-       |> navigate(:deployment_groups)
-       |> assign(messages: [{:success, message}])}
+      {:noreply, navigate(socket, :success)}
     end
   end
 
@@ -474,7 +500,7 @@ defmodule LivebookWeb.SessionLive.AppTeamsLive do
   end
 
   defp navigate(socket, action)
-       when action in [:deployment_groups, :add_deployment_group, :add_agent] do
+       when action in [:deployment_groups, :add_deployment_group, :add_agent, :success] do
     assign(socket, action: action, messages: [])
   end
 
