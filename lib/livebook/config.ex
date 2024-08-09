@@ -61,23 +61,13 @@ defmodule Livebook.Config do
   def docker_images() do
     version = app_version()
 
-    {version, version_cuda} =
-      if version =~ "dev" do
-        {"edge", "latest"}
-      else
-        {version, version}
-      end
+    version = if version =~ "dev", do: "nightly", else: version
 
     [
       %{tag: version, name: "Livebook", env: []},
       %{
-        tag: "#{version_cuda}-cuda11.8",
-        name: "Livebook + CUDA 11.8",
-        env: [{"XLA_TARGET", "cuda118"}]
-      },
-      %{
-        tag: "#{version_cuda}-cuda12.1",
-        name: "Livebook + CUDA 12.1",
+        tag: "#{version}-cuda12",
+        name: "Livebook + CUDA 12",
         env: [{"XLA_TARGET", "cuda120"}]
       }
     ]
@@ -215,26 +205,6 @@ defmodule Livebook.Config do
   @spec port() :: pos_integer() | 0
   def port() do
     Application.get_env(:livebook, LivebookWeb.Endpoint)[:http][:port]
-  end
-
-  @doc """
-  Returns the base url path for the Livebook endpoint.
-  """
-  @spec base_url_path() :: String.t()
-  def base_url_path() do
-    path = Application.get_env(:livebook, LivebookWeb.Endpoint)[:url][:path]
-    String.trim_trailing(path, "/")
-  end
-
-  @doc """
-  Returns the base url path for Livebook public endpoints (health & assets)
-  """
-  @spec public_base_url_path() :: String.t()
-  def public_base_url_path() do
-    case Application.get_env(:livebook, :public_base_url_path) do
-      nil -> base_url_path()
-      path -> String.trim_trailing(path, "/")
-    end
   end
 
   @doc """

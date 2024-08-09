@@ -193,10 +193,35 @@ defmodule Livebook.FlyAPI do
   """
   @spec await_machine_started(String.t(), String.t(), String.t()) :: :ok | {:error, error}
   def await_machine_started(token, app_name, machine_id) do
+    # The maximum supported timeout is 60s, but the machine may take
+    # longer to start if it uses a large Docker image (such as CUDA),
+    # provided the image is not already in the Fly cache. To achieve
+    # a longer wait, we retry request timeouts (and possible network
+    # errors).
     with {:ok, _data} <-
            flaps_request(token, "/v1/apps/#{app_name}/machines/#{machine_id}/wait",
              params: %{state: "started", timeout: 60},
              receive_timeout: 90_000,
+             retry: :safe_transient,
+             max_retries: 4,
+             retry_log_level: false
+           ) do
+      :ok
+    end
+  end
+
+  @doc """
+  Waits for the machine to be destroyed.
+  """
+  @spec await_machine_destroyed(String.t(), String.t(), String.t(), pos_integer()) ::
+          :ok | {:error, error}
+  def await_machine_destroyed(token, app_name, machine_id, timeout_s) when timeout_s <= 60 do
+    # Contrarily to the above, if we expect the machine to be destroying,
+    # it should take a short time, so we don't retry requests and expect
+    # a rather short timeout
+    with {:ok, _data} <-
+           flaps_request(token, "/v1/apps/#{app_name}/machines/#{machine_id}/wait",
+             params: %{state: "destroyed", timeout: timeout_s},
              retry: false
            ) do
       :ok

@@ -5,7 +5,7 @@ defmodule Livebook.IntellisenseTest do
 
   # Returns intellisense context resulting from evaluating
   # the given block of code in a fresh context.
-  defmacrop eval(do: block) do
+  defmacrop eval(ebin_path \\ System.tmp_dir!(), do: block) do
     quote do
       block = unquote(Macro.escape(block))
       binding = []
@@ -14,6 +14,7 @@ defmodule Livebook.IntellisenseTest do
 
       %{
         env: env,
+        ebin_path: unquote(ebin_path),
         map_binding: fn fun -> fun.(binding) end
       }
     end
@@ -1580,6 +1581,77 @@ defmodule Livebook.IntellisenseTest do
 
       assert content =~ ~r"https://www.erlang.org/doc/man/string.html#uppercase-1"
     end
+
+    @tag :tmp_dir
+    test "returns the go to definition link", %{tmp_dir: tmp_dir} do
+      Code.put_compiler_option(:debug_info, true)
+
+      context =
+        eval tmp_dir do
+          alias Livebook.IntellisenseTest.GoToDefinition
+        end
+
+      code = ~S'''
+      defmodule Livebook.IntellisenseTest.GoToDefinition do
+        @type t :: term()
+        @type foo :: foo(:bar)
+        @type foo(var) :: {var, t()}
+
+        defmacro with_logging(do: block) do
+          quote do
+            require Logger
+            Logger.debug("Running code")
+            result = unquote(block)
+            Logger.debug("Result: #{inspect(result)}")
+            result
+          end
+        end
+
+        @spec hello(var :: term()) :: foo(term())
+        def hello(message) do
+          {:bar, message}
+        end
+      end
+      '''
+
+      file = "#{__ENV__.file}#cell:#{Livebook.Utils.random_short_id()}"
+      path = Path.join(tmp_dir, "Elixir.Livebook.IntellisenseTest.GoToDefinition.beam")
+
+      [{_module, bytecode}] = Code.compile_string(code, file)
+      File.write!(path, bytecode)
+      Code.prepend_path(tmp_dir)
+
+      assert %{contents: [content]} =
+               Intellisense.get_details("GoToDefinition", 14, context, node())
+
+      assert content =~ "#go-to-definition?#{URI.encode_query(%{file: file, line: 1})}"
+
+      assert %{contents: [content]} =
+               Intellisense.get_details("GoToDefinition.t", 16, context, node())
+
+      assert content =~ "#go-to-definition?#{URI.encode_query(%{file: file, line: 2})}"
+
+      assert %{contents: [arity_0_content, arity_1_content]} =
+               Intellisense.get_details("GoToDefinition.foo", 18, context, node())
+
+      assert arity_0_content =~ "#go-to-definition?#{URI.encode_query(%{file: file, line: 3})}"
+      assert arity_1_content =~ "#go-to-definition?#{URI.encode_query(%{file: file, line: 4})}"
+
+      assert %{contents: [content]} =
+               Intellisense.get_details("GoToDefinition.with_logging", 20, context, node())
+
+      assert content =~ "#go-to-definition?#{URI.encode_query(%{file: file, line: 6})}"
+
+      assert %{contents: [content]} =
+               Intellisense.get_details("GoToDefinition.hello", 18, context, node())
+
+      assert content =~ "#go-to-definition?#{URI.encode_query(%{file: file, line: 17})}"
+    after
+      Code.put_compiler_option(:debug_info, false)
+      Code.delete_path(tmp_dir)
+      :code.purge(:"Elixir.Livebook.IntellisenseTest.GoToDefinition")
+      :code.delete(:"Elixir.Livebook.IntellisenseTest.GoToDefinition")
+    end
   end
 
   describe "get_signature_items/3" do
@@ -1891,18 +1963,17 @@ defmodule Livebook.IntellisenseTest do
             '''
 
           Livebook.Runtime.evaluate_code(runtime, :elixir, code, {:c1, :e1}, [])
-
           receive do: ({:runtime_evaluation_response, :e1, _, _} -> :ok)
           send(parent, :continue)
 
-          Process.sleep(:infinity)
+          receive do: (:done -> :ok)
         end
       })
 
     receive do: (:continue -> :ok)
 
     on_exit(fn ->
-      Process.exit(runtime_owner_pid, :kill)
+      send(runtime_owner_pid, :done)
     end)
 
     [node: runtime.node]

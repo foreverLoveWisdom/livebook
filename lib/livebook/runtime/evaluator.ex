@@ -8,10 +8,10 @@ defmodule Livebook.Runtime.Evaluator do
   #
   # Storing the binding in the same process that evaluates the code is
   # essential, because otherwise we would have to send it to another
-  # process, which means copying a potentially massive amounts of data.
+  # process, which means copying potentially massive amounts of data.
   #
   # Also, note that this process intentionally is not a GenServer,
-  # because during evaluation we it may receive arbitrary messages
+  # because during evaluation it may receive arbitrary messages
   # and we want to keep them in the inbox, whereas a GenServer would
   # always consume them.
 
@@ -63,7 +63,7 @@ defmodule Livebook.Runtime.Evaluator do
   # would take too much memory
   @evaluator_info_key :evaluator_info
 
-  # We stor the path in process dictionary, so that the tracer can access it
+  # We store the path in the process dictionary, so that the tracer can access it.
   @ebin_path_key :ebin_path
 
   @doc """
@@ -183,17 +183,17 @@ defmodule Livebook.Runtime.Evaluator do
   @doc """
   Returns an empty intellisense context.
   """
-  @spec intellisense_context() :: Livebook.Intellisense.intellisense_context()
+  @spec intellisense_context() :: Livebook.Intellisense.context()
   def intellisense_context() do
     env = Code.env_for_eval([])
     map_binding = fn fun -> fun.([]) end
-    %{env: env, map_binding: map_binding}
+    %{env: env, ebin_path: ebin_path(), map_binding: map_binding}
   end
 
   @doc """
   Builds intellisense context from the given evaluation.
   """
-  @spec intellisense_context(t(), list(ref())) :: Livebook.Intellisense.intellisense_context()
+  @spec intellisense_context(t(), list(ref())) :: Livebook.Intellisense.context()
   def intellisense_context(evaluator, parent_refs) do
     {:dictionary, dictionary} = Process.info(evaluator.pid, :dictionary)
 
@@ -210,7 +210,11 @@ defmodule Livebook.Runtime.Evaluator do
 
     map_binding = fn fun -> map_binding(evaluator, parent_refs, fun) end
 
-    %{env: env, map_binding: map_binding}
+    %{
+      env: env,
+      ebin_path: find_in_dictionary(dictionary, @ebin_path_key),
+      map_binding: map_binding
+    }
   end
 
   defp find_in_dictionary(dictionary, key) do

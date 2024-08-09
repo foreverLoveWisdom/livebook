@@ -6,7 +6,7 @@ defmodule Livebook.MixProject do
   use Mix.Project
 
   @elixir_requirement "~> 1.16"
-  @version "0.14.0-dev"
+  @version "0.15.0-dev"
   @description "Automate code & data workflows with interactive notebooks"
 
   def project do
@@ -248,6 +248,7 @@ defmodule Livebook.MixProject do
       "docs/deployment/docker.md",
       "docs/deployment/clustering.md",
       "docs/deployment/fips.md",
+      "docs/deployment/nginx_https.md",
       "docs/teams/intro_to_teams.md",
       "docs/teams/shared_secrets.md",
       "docs/teams/shared_file_storages.md",

@@ -47,7 +47,7 @@ defmodule Livebook.Runtime.Fly do
   # configuration `inet_dist_listen_options` -> `ipv6_v6only`, which
   # has OS-specific value. However, we don't rely on this here.
 
-  defstruct [:config, :node, :server_pid]
+  defstruct [:config, :node, :server_pid, :machine_id, :previous_machine_id]
 
   use GenServer, restart: :temporary
 
@@ -56,7 +56,9 @@ defmodule Livebook.Runtime.Fly do
   @type t :: %__MODULE__{
           config: config(),
           node: node() | nil,
-          server_pid: pid() | nil
+          server_pid: pid() | nil,
+          machine_id: String.t() | nil,
+          previous_machine_id: String.t() | nil
         }
 
   @type config :: %{
@@ -114,7 +116,15 @@ defmodule Livebook.Runtime.Fly do
       |> :erlang.term_to_binary()
       |> Base.encode64()
 
-    with {:ok, machine_id, machine_ip} <-
+    with :ok <-
+           (if config.volume_id && runtime.previous_machine_id do
+              with_log(caller, "await resources", fn ->
+                await_previous_machine_destroyed(config, runtime.previous_machine_id)
+              end)
+            else
+              :ok
+            end),
+         {:ok, machine_id, machine_ip} <-
            with_log(caller, "create machine", fn ->
              create_machine(config, runtime_data)
            end),
@@ -141,7 +151,7 @@ defmodule Livebook.Runtime.Fly do
 
       send(primary_pid, :node_initialized)
 
-      runtime = %{runtime | node: child_node, server_pid: server_pid}
+      runtime = %{runtime | node: child_node, server_pid: server_pid, machine_id: machine_id}
       send(caller, {:runtime_connect_done, self(), {:ok, runtime}})
 
       {:noreply, %{state | primary_ref: primary_ref, proxy_port: proxy_port}}
@@ -171,7 +181,9 @@ defmodule Livebook.Runtime.Fly do
         Map.new(base_image.env),
         %{
           "LIVEBOOK_RUNTIME" => runtime_data,
-          "ERL_AFLAGS" => "-proto_dist inet6_tcp"
+          "ERL_AFLAGS" => "-proto_dist inet6_tcp",
+          # Make the token automatically available for FLAME
+          "FLY_API_TOKEN" => config.token
         }
       )
 
@@ -207,18 +219,23 @@ defmodule Livebook.Runtime.Fly do
     end
   end
 
+  defp await_previous_machine_destroyed(config, machine_id) do
+    # We wait only to ensure the volume is detached. If waiting fails,
+    # we ignore the error and try to create the machine anyway, if the
+    # volume is attached, creation will fail
+    _ = Livebook.FlyAPI.await_machine_destroyed(config.token, config.app_name, machine_id, 5)
+    :ok
+  end
+
   defp await_machine_started(config, machine_id) do
     case Livebook.FlyAPI.await_machine_started(config.token, config.app_name, machine_id) do
       :ok ->
         :ok
 
-      {:error, %{status: 408}} ->
-        {:error,
-         "timed out while waiting for the machine to start. See the app" <>
-           " logs in the Fly.io dashboard to determine the reason"}
-
       {:error, %{message: message}} ->
-        {:error, "failed while waiting for the machine to started, reason: #{message}"}
+        {:error,
+         "failed while waiting for the machine to start, reason: #{message}." <>
+           " See the app logs in the Fly.io dashbaord to determine the reason"}
     end
   end
 
@@ -268,10 +285,12 @@ defmodule Livebook.Runtime.Fly do
         "--watch-stdin"
       ]
 
+      env = [{~c"FLY_NO_UPDATE_CHECK", ~c"1"}]
+
       port =
         Port.open(
           {:spawn_executable, flyctl_path},
-          [:binary, :hide, :stderr_to_stdout, args: args]
+          [:binary, :hide, :stderr_to_stdout, args: args, env: env]
         )
 
       port_ref = Port.monitor(port)
@@ -303,13 +322,27 @@ defmodule Livebook.Runtime.Fly do
   end
 
   defp find_fly_executable() do
-    if path = System.find_executable("flyctl") do
+    if path = System.find_executable("flyctl") || default_flyctl_path() do
       {:ok, path}
     else
       {:error,
        "no flyctl executable found in PATH. For installation instructions" <>
          " refer to https://fly.io/docs/flyctl/install"}
     end
+  end
+
+  defp default_flyctl_path() do
+    # Checks the default locations where flyctl gets installed using
+    # the official instructions
+
+    home = System.user_home()
+
+    paths = [
+      "/opt/homebrew/bin/flyctl",
+      home && Path.join(home, ".fly/bin/flyctl")
+    ]
+
+    Enum.find(paths, fn path -> path && File.regular?(path) end)
   end
 
   defp fetch_runtime_info(child_node) do
@@ -392,7 +425,10 @@ defimpl Livebook.Runtime, for: Livebook.Runtime.Fly do
   end
 
   def duplicate(runtime) do
-    Livebook.Runtime.Fly.new(runtime.config)
+    %Livebook.Runtime.Fly{
+      config: runtime.config,
+      previous_machine_id: runtime.machine_id
+    }
   end
 
   def evaluate_code(runtime, language, code, locator, parent_locators, opts \\ []) do
