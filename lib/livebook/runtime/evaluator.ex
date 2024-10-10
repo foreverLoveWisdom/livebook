@@ -318,7 +318,8 @@ defmodule Livebook.Runtime.Evaluator do
       contexts: %{},
       initial_context: context,
       initial_context_version: nil,
-      ignored_pdict_keys: ignored_pdict_keys
+      ignored_pdict_keys: ignored_pdict_keys,
+      tmp_dir: tmp_dir
     }
 
     :proc_lib.init_ack(evaluator)
@@ -434,7 +435,10 @@ defmodule Livebook.Runtime.Evaluator do
     end
 
     start_time = System.monotonic_time()
-    {eval_result, code_markers} = eval(language, code, context.binding, context.env)
+
+    {eval_result, code_markers} =
+      eval(language, code, context.binding, context.env, state.tmp_dir)
+
     evaluation_time_ms = time_diff_ms(start_time)
 
     %{tracer_info: tracer_info} = Evaluator.IOProxy.after_evaluation(state.io_proxy)
@@ -468,8 +472,20 @@ defmodule Livebook.Runtime.Evaluator do
           identifiers_used = :unknown
           identifiers_defined = %{}
           identifier_definitions = []
-          # Empty context
-          new_context = initial_context()
+
+          # Mostly empty context, however we keep imports and process
+          # dictionary from the previous context, since these are not
+          # diffed
+          new_context = %{
+            id: random_long_id(),
+            binding: [],
+            env:
+              context.env
+              |> prune_env(%Evaluator.Tracer{})
+              |> Map.replace!(:versioned_vars, %{}),
+            pdict: context.pdict
+          }
+
           {new_context, result, identifiers_used, identifiers_defined, identifier_definitions}
       end
 
@@ -624,7 +640,7 @@ defmodule Livebook.Runtime.Evaluator do
     |> Map.update!(:context_modules, &(&1 ++ prev_env.context_modules))
   end
 
-  defp eval(:elixir, code, binding, env) do
+  defp eval(:elixir, code, binding, env, _tmp_dir) do
     {{result, extra_diagnostics}, diagnostics} =
       Code.with_diagnostics([log: true], fn ->
         try do
@@ -688,20 +704,87 @@ defmodule Livebook.Runtime.Evaluator do
     {result, code_markers}
   end
 
-  defp eval(:erlang, code, binding, env) do
+  # Erlang code is either statements as currently supported, or modules.
+  # In case we want to support modules - it makes sense to allow users to use
+  # includes, defines and thus we use the epp-module first - try to find out
+  #
+  # if in the tokens from erl_scan we find at least 1 module-token we assume
+  # that the user is defining a module, if not the previous code is called.
+
+  defp eval(:erlang, code, binding, env, tmp_dir) do
+    case :erl_scan.string(String.to_charlist(code), {1, 1}, [:text]) do
+      {:ok, [{:-, _}, {:atom, _, :module} | _], _} ->
+        eval_erlang_module(code, binding, env, tmp_dir)
+
+      {:ok, tokens, _} ->
+        eval_erlang_statements(code, tokens, binding, env)
+
+      {:error, {location, module, description}, _end_loc} ->
+        process_erlang_error(env, code, location, module, description)
+    end
+  end
+
+  # Explain to user: without tmp_dir to write files, they cannot compile erlang-modules
+  defp eval_erlang_module(_code, _binding, _env, nil) do
+    {{:error, :error, "writing Erlang modules requires a writeable file system", []}, []}
+  end
+
+  defp eval_erlang_module(code, binding, env, tmp_dir) do
+    # Consider using in-memory file, once :ram file supports IO device API.
+    # See https://github.com/erlang/otp/issues/7239
+    filename = Path.join(tmp_dir, "epp.tmp")
+    File.mkdir_p!(tmp_dir)
+    File.write!(filename, code)
+
+    try do
+      {:ok, forms} = :epp.parse_file(filename, source_name: String.to_charlist(env.file))
+
+      case :compile.forms(forms) do
+        {:ok, module, binary} ->
+          file =
+            if ebin_path = ebin_path() do
+              Path.join(ebin_path, "#{module}.beam")
+            else
+              "#{module}.beam"
+            end
+
+          {:module, module} =
+            :code.load_binary(module, String.to_charlist(file), binary)
+
+          # Registration of module
+          env = %{env | module: module, versioned_vars: %{}}
+          Evaluator.Tracer.trace({:on_module, binary, %{}}, env)
+
+          {{:ok, {:ok, module}, binding, env}, []}
+
+        # TODO: deal with errors and reports as diagnostics
+        :error ->
+          {{:error, :error, "compile forms error", []}, []}
+      end
+    catch
+      kind, error ->
+        stacktrace = prune_stacktrace(:erl_eval, __STACKTRACE__)
+        {{:error, kind, error, stacktrace}, []}
+    after
+      # Clean up after ourselves.
+      _ = File.rm(filename)
+    end
+  end
+
+  defp eval_erlang_statements(code, tokens, binding, env) do
     try do
       erl_binding =
         Enum.reduce(binding, %{}, fn {name, value}, erl_binding ->
           :erl_eval.add_binding(elixir_to_erlang_var(name), value, erl_binding)
         end)
 
-      with {:ok, tokens, _} <- :erl_scan.string(String.to_charlist(code), {1, 1}, [:text]),
-           {:ok, parsed} <- :erl_parse.parse_exprs(tokens),
+      with {:ok, parsed} <- :erl_parse.parse_exprs(tokens),
            {:value, result, new_erl_binding} <- :erl_eval.exprs(parsed, erl_binding) do
         # Simple heuristic to detect the used variables. We look at
         # the tokens and assume all var tokens are used variables.
         # This will not handle shadowing of variables in fun definitions
         # and will only work well enough for expressions, not for modules.
+
         used_vars =
           for {:var, _anno, name} <- tokens,
               do: {erlang_to_elixir_var(name), nil},
@@ -731,10 +814,6 @@ defmodule Livebook.Runtime.Evaluator do
 
         {{:ok, result, binding, env}, []}
       else
-        # Tokenizer error
-        {:error, {location, module, description}, _end_loc} ->
-          process_erlang_error(env, code, location, module, description)
-
         # Parser error
         {:error, {location, module, description}} ->
           process_erlang_error(env, code, location, module, description)
@@ -785,29 +864,10 @@ defmodule Livebook.Runtime.Evaluator do
   end
 
   defp make_snippet(code, location) do
-    start_line = 1
-    start_column = 1
-    line = :erl_anno.line(location)
-
-    case :erl_anno.column(location) do
-      :undefined ->
-        nil
-
-      column ->
-        lines = :string.split(code, "\n", :all)
-        snippet = :lists.nth(line - start_line + 1, lines)
-
-        offset =
-          if line == start_line do
-            column - start_column
-          else
-            column - 1
-          end
-
-        case :string.trim(code, :leading) do
-          [] -> nil
-          _ -> %{content: snippet, offset: offset}
-        end
+    if :erl_anno.column(location) != :undefined and :string.trim(code, :leading) != [] do
+      line = :erl_anno.line(location)
+      lines = :string.split(code, "\n", :all)
+      :lists.nth(line, lines)
     end
   end
 
@@ -892,11 +952,11 @@ defmodule Livebook.Runtime.Evaluator do
           do: {:module, module},
           into: identifiers_used
 
+    # Note: `module_info` works for both Erlang and Elixir modules, as opposed to `__info__`
     identifiers_defined =
-      for {module, _line_vars} <- tracer_info.modules_defined,
-          version = module.__info__(:md5),
-          do: {{:module, module}, version},
-          into: identifiers_defined
+      for {module, _line_vars} <- tracer_info.modules_defined, into: identifiers_defined do
+        {{:module, module}, module.module_info(:md5)}
+      end
 
     # Aliases
 
